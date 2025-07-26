@@ -1,0 +1,721 @@
+2. backend/schema.sql (From Milestone 2 - No changes)
+SQL
+
+-- Drop tables if they exist to allow for clean re-creation
+DROP TABLE IF EXISTS conversation_history; -- New table for conversation history
+DROP TABLE IF EXISTS order_items;
+DROP TABLE IF EXISTS orders;
+DROP TABLE IF EXISTS products;
+DROP TABLE IF EXISTS customers;
+
+
+-- Create Customers Table
+CREATE TABLE customers (
+    customer_id VARCHAR(255) PRIMARY KEY,
+    customer_name VARCHAR(255),
+    customer_email VARCHAR(255) UNIQUE
+);
+
+-- Create Products Table
+CREATE TABLE products (
+    product_id VARCHAR(255) PRIMARY KEY,
+    product_name VARCHAR(255),
+    category VARCHAR(255),
+    price DECIMAL(10, 2),
+    stock_quantity INTEGER
+);
+
+-- Create Orders Table
+CREATE TABLE orders (
+    order_id VARCHAR(255) PRIMARY KEY,
+    customer_id VARCHAR(255) REFERENCES customers(customer_id),
+    order_date TIMESTAMP,
+    total_amount DECIMAL(10, 2),
+    status VARCHAR(50)
+);
+
+-- Create Order Items Table (Junction table for many-to-many relationship between orders and products)
+CREATE TABLE order_items (
+    order_item_id SERIAL PRIMARY KEY, -- Auto-incrementing ID
+    order_id VARCHAR(255) REFERENCES orders(order_id),
+    product_id VARCHAR(255) REFERENCES products(product_id),
+    quantity INTEGER,
+    price_at_time_of_order DECIMAL(10, 2), -- Price when the item was ordered
+    UNIQUE (order_id, product_id)
+);
+
+-- NEW: Table for Conversation History (Milestone 3)
+CREATE TABLE conversation_history (
+    id SERIAL PRIMARY KEY,
+    conversation_id VARCHAR(255) NOT NULL, -- To group related messages
+    user_id VARCHAR(255), -- Optional: if you want to track by specific users
+    user_message TEXT NOT NULL,
+    ai_response TEXT NOT NULL,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+Action: Re-run this schema.sql if you've already run it, to ensure the conversation_history table is created.
+
+3. backend/load_data.py (From Milestone 2 - No changes required for functionality)
+Python
+
+import pandas as pd
+import psycopg2
+from psycopg2 import extras
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# --- Database Connection Configuration ---
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+
+# --- Paths to your CSV files ---
+# Adjust this path based on where you extracted your dataset
+CSV_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'ecommerce-dataset')
+
+CUSTOMERS_CSV = os.path.join(CSV_DIR, 'customers.csv')
+PRODUCTS_CSV = os.path.join(CSV_DIR, 'products.csv')
+ORDERS_CSV = os.path.join(CSV_DIR, 'orders.csv')
+ORDER_ITEMS_CSV = os.path.join(CSV_DIR, 'order_items.csv')
+
+def get_db_connection_for_loading():
+    """Establishes a connection to the PostgreSQL database for data loading."""
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT
+        )
+        print("Database connection for loading successful.")
+    except psycopg2.Error as e:
+        print(f"Error connecting to database for loading: {e}")
+        exit()
+    return conn
+
+def load_customers(conn):
+    try:
+        df = pd.read_csv(CUSTOMERS_CSV)
+        df = df.drop_duplicates(subset=['customer_id'])
+        df = df.drop_duplicates(subset=['customer_email'])
+
+        cur = conn.cursor()
+        print(f"Loading {len(df)} customers...")
+        data_to_insert = [tuple(row) for row in df[['customer_id', 'customer_name', 'customer_email']].itertuples(index=False)]
+
+        query = """
+        INSERT INTO customers (customer_id, customer_name, customer_email)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (customer_id) DO NOTHING;
+        """
+        extras.execute_batch(cur, query, data_to_insert)
+        conn.commit()
+        print("Customers data loaded successfully.")
+    except FileNotFoundError:
+        print(f"Error: {CUSTOMERS_CSV} not found.")
+    except Exception as e:
+        conn.rollback()
+        print(f"Error loading customers data: {e}")
+
+def load_products(conn):
+    try:
+        df = pd.read_csv(PRODUCTS_CSV)
+        df = df.drop_duplicates(subset=['product_id'])
+        df['price'] = pd.to_numeric(df['price'], errors='coerce')
+        df['stock_quantity'] = pd.to_numeric(df['stock_quantity'], errors='coerce').fillna(0).astype(int)
+
+        cur = conn.cursor()
+        print(f"Loading {len(df)} products...")
+        data_to_insert = [tuple(row) for row in df[['product_id', 'product_name', 'category', 'price', 'stock_quantity']].itertuples(index=False)]
+
+        query = """
+        INSERT INTO products (product_id, product_name, category, price, stock_quantity)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (product_id) DO NOTHING;
+        """
+        extras.execute_batch(cur, query, data_to_insert)
+        conn.commit()
+        print("Products data loaded successfully.")
+    except FileNotFoundError:
+        print(f"Error: {PRODUCTS_CSV} not found.")
+    except Exception as e:
+        conn.rollback()
+        print(f"Error loading products data: {e}")
+
+def load_orders(conn):
+    try:
+        df = pd.read_csv(ORDERS_CSV)
+        df = df.drop_duplicates(subset=['order_id'])
+        df['order_date'] = pd.to_datetime(df['order_date'])
+        df['total_amount'] = pd.to_numeric(df['total_amount'], errors='coerce')
+
+        cur = conn.cursor()
+        print(f"Loading {len(df)} orders...")
+        data_to_insert = [tuple(row) for row in df[['order_id', 'customer_id', 'order_date', 'total_amount', 'status']].itertuples(index=False)]
+
+        query = """
+        INSERT INTO orders (order_id, customer_id, order_date, total_amount, status)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (order_id) DO NOTHING;
+        """
+        extras.execute_batch(cur, query, data_to_insert)
+        conn.commit()
+        print("Orders data loaded successfully.")
+    except FileNotFoundError:
+        print(f"Error: {ORDERS_CSV} not found.")
+    except Exception as e:
+        conn.rollback()
+        print(f"Error loading orders data: {e}")
+
+def load_order_items(conn):
+    try:
+        df = pd.read_csv(ORDER_ITEMS_CSV)
+        df['quantity'] = pd.to_numeric(df['quantity'], errors='coerce').fillna(0).astype(int)
+        df['price_at_time_of_order'] = pd.to_numeric(df['price_at_time_of_order'], errors='coerce')
+
+        cur = conn.cursor()
+        print(f"Loading {len(df)} order items...")
+        data_to_insert = [tuple(row) for row in df[['order_id', 'product_id', 'quantity', 'price_at_time_of_order']].itertuples(index=False)]
+
+        query = """
+        INSERT INTO order_items (order_id, product_id, quantity, price_at_time_of_order)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (order_id, product_id) DO NOTHING;
+        """
+        extras.execute_batch(cur, query, data_to_insert)
+        conn.commit()
+        print("Order items data loaded successfully.")
+    except FileNotFoundError:
+        print(f"Error: {ORDER_ITEMS_CSV} not found.")
+    except Exception as e:
+        conn.rollback()
+        print(f"Error loading order items data: {e}")
+
+if __name__ == "__main__":
+    conn = get_db_connection_for_loading()
+    if conn:
+        print("Starting data ingestion...")
+        load_customers(conn)
+        load_products(conn)
+        load_orders(conn)
+        load_order_items(conn)
+        conn.close()
+        print("Data ingestion complete. Database connection closed.")
+4. backend/database.py (Milestone 3)
+Handles SQLAlchemy engine and session.
+
+Python
+
+import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
+from dotenv import load_dotenv
+
+load_dotenv()
+
+DATABASE_URL = (
+    f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@"
+    f"{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+)
+
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
+
+# Dependency to get a DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+5. backend/models.py (Milestone 3)
+SQLAlchemy models mapping to your database tables.
+
+Python
+
+from sqlalchemy import Column, Integer, String, DECIMAL, TIMESTAMP, ForeignKey, Text
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+from .database import Base
+
+class Customer(Base):
+    __tablename__ = "customers"
+    customer_id = Column(String, primary_key=True, index=True)
+    customer_name = Column(String)
+    customer_email = Column(String, unique=True)
+
+    orders = relationship("Order", back_populates="customer")
+
+class Product(Base):
+    __tablename__ = "products"
+    product_id = Column(String, primary_key=True, index=True)
+    product_name = Column(String)
+    category = Column(String)
+    price = Column(DECIMAL(10, 2))
+    stock_quantity = Column(Integer)
+
+    order_items = relationship("OrderItem", back_populates="product")
+
+class Order(Base):
+    __tablename__ = "orders"
+    order_id = Column(String, primary_key=True, index=True)
+    customer_id = Column(String, ForeignKey("customers.customer_id"))
+    order_date = Column(TIMESTAMP)
+    total_amount = Column(DECIMAL(10, 2))
+    status = Column(String)
+
+    customer = relationship("Customer", back_populates="orders")
+    order_items = relationship("OrderItem", back_populates="order")
+
+class OrderItem(Base):
+    __tablename__ = "order_items"
+    order_item_id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(String, ForeignKey("orders.order_id"))
+    product_id = Column(String, ForeignKey("products.product_id"))
+    quantity = Column(Integer)
+    price_at_time_of_order = Column(DECIMAL(10, 2))
+
+    order = relationship("Order", back_populates="order_items")
+    product = relationship("Product", back_populates="order_items")
+
+# NEW: Conversation History Model (Milestone 3)
+class ConversationHistory(Base):
+    __tablename__ = "conversation_history"
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(String, nullable=False, index=True)
+    user_id = Column(String, nullable=True) # Optional, can be NULL
+    user_message = Column(Text, nullable=False)
+    ai_response = Column(Text, nullable=False)
+    timestamp = Column(TIMESTAMP, default=func.now())
+6. backend/schemas.py (Milestone 3)
+Pydantic schemas for request/response validation.
+
+Python
+
+from pydantic import BaseModel
+from typing import Optional, List
+from datetime import datetime
+
+# Request schema for chat endpoint (Milestone 4)
+class ChatRequest(BaseModel):
+    user_message: str
+    conversation_id: Optional[str] = None # For continuing a conversation
+    user_id: Optional[str] = None # Optional: for tracking specific users
+
+# Response schema for chat endpoint (Milestone 4)
+class ChatResponse(BaseModel):
+    conversation_id: str
+    ai_response: str
+    user_message: str # Echo back the user message for context
+    timestamp: datetime
+
+# Pydantic schemas for data models (optional, for explicit API responses if needed)
+class CustomerBase(BaseModel):
+    customer_id: str
+    customer_name: str
+    customer_email: str
+
+    class Config:
+        from_attributes = True # for SQLAlchemy integration
+
+class ProductBase(BaseModel):
+    product_id: str
+    product_name: str
+    category: str
+    price: float
+    stock_quantity: int
+
+    class Config:
+        from_attributes = True
+
+class OrderBase(BaseModel):
+    order_id: str
+    customer_id: str
+    order_date: datetime
+    total_amount: float
+    status: str
+
+    class Config:
+        from_attributes = True
+
+class OrderItemBase(BaseModel):
+    order_item_id: int
+    order_id: str
+    product_id: str
+    quantity: int
+    price_at_time_of_order: float
+
+    class Config:
+        from_attributes = True
+
+class ConversationHistoryBase(BaseModel):
+    id: int
+    conversation_id: str
+    user_id: Optional[str]
+    user_message: str
+    ai_response: str
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True
+7. backend/crud.py (Milestone 4)
+Database Create, Read, Update, Delete (CRUD) operations.
+
+Python
+
+from sqlalchemy.orm import Session
+from . import models, schemas
+from sqlalchemy import func, and_
+import uuid
+
+# --- Conversation History CRUD ---
+def create_conversation_entry(db: Session, user_message: str, ai_response: str, conversation_id: str, user_id: Optional[str] = None):
+    db_conversation = models.ConversationHistory(
+        conversation_id=conversation_id,
+        user_id=user_id,
+        user_message=user_message,
+        ai_response=ai_response
+    )
+    db.add(db_conversation)
+    db.commit()
+    db.refresh(db_conversation)
+    return db_conversation
+
+def get_conversation_history(db: Session, conversation_id: str):
+    return db.query(models.ConversationHistory).filter(models.ConversationHistory.conversation_id == conversation_id).order_by(models.ConversationHistory.timestamp).all()
+
+# --- Product Data Retrieval (for LLM to query) ---
+def get_top_n_sold_products(db: Session, n: int = 5):
+    # This query sums quantities from order_items and joins with products
+    result = db.query(
+        models.Product.product_name,
+        models.Product.category,
+        func.sum(models.OrderItem.quantity).label("total_quantity_sold")
+    ).join(models.OrderItem).group_by(
+        models.Product.product_id, models.Product.product_name, models.Product.category
+    ).order_by(
+        func.sum(models.OrderItem.quantity).desc()
+    ).limit(n).all()
+
+    # Format the result for easy consumption
+    return [{"product_name": r.product_name, "category": r.category, "total_quantity_sold": int(r.total_quantity_sold)} for r in result]
+
+def get_product_stock(db: Session, product_name: str):
+    # Case-insensitive search
+    product = db.query(models.Product).filter(
+        func.lower(models.Product.product_name).ilike(f"%{product_name.lower()}%")
+    ).first()
+    if product:
+        return {"product_name": product.product_name, "stock_quantity": product.stock_quantity}
+    return None
+
+# --- Order Data Retrieval (for LLM to query) ---
+def get_order_status(db: Session, order_id: str):
+    order = db.query(models.Order).filter(models.Order.order_id == order_id).first()
+    if order:
+        return {"order_id": order.order_id, "status": order.status, "order_date": order.order_date, "total_amount": float(order.total_amount)}
+    return None
+
+def get_order_details_for_customer(db: Session, customer_email: str):
+    customer = db.query(models.Customer).filter(models.Customer.customer_email == customer_email).first()
+    if customer:
+        orders = db.query(models.Order).filter(models.Order.customer_id == customer.customer_id).all()
+        return [{"order_id": o.order_id, "order_date": o.order_date, "total_amount": float(o.total_amount), "status": o.status} for o in orders]
+    return None
+
+8. backend/services.py (Milestone 5)
+This file contains the core business logic, including LLM integration and data querying based on user intent.
+
+Python
+
+import os
+from groq import Groq
+from sqlalchemy.orm import Session
+from . import crud
+import json
+import uuid
+
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+client = Groq(api_key=GROQ_API_KEY)
+
+# Tool definitions for Groq's function calling
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_top_n_sold_products",
+            "description": "Get the top N most sold products from the database.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "n": {
+                        "type": "integer",
+                        "description": "The number of top products to retrieve (default is 5).",
+                        "default": 5
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_product_stock",
+            "description": "Get the current stock quantity for a specific product by its name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product_name": {
+                        "type": "string",
+                        "description": "The name or a keyword of the product to check stock for."
+                    }
+                },
+                "required": ["product_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_order_status",
+            "description": "Get the status of a specific order using its order ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {
+                        "type": "string",
+                        "description": "The unique ID of the order."
+                    }
+                },
+                "required": ["order_id"]
+            }
+        }
+    },
+    # You can add more tools here for other functionalities like:
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "get_order_details_for_customer",
+    #         "description": "Get all orders for a given customer email.",
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "customer_email": {
+    #                     "type": "string",
+    #                     "description": "The email address of the customer."
+    #                 }
+    #             },
+    #             "required": ["customer_email"]
+    #         }
+    #     }
+    # }
+]
+
+def get_llm_response(messages: list):
+    """Sends messages to the LLM and gets a response, potentially with function calls."""
+    if not GROQ_API_KEY:
+        return {"error": "Groq API key not set. Please add it to your .env file."}
+
+    try:
+        chat_completion = client.chat.completions.create(
+            messages=messages,
+            model="llama3-8b-8192", # Or "mixtral-8x7b-32768", "gemma-7b-it"
+            tools=TOOLS,
+            tool_choice="auto",
+            max_tokens=2000,
+            temperature=0.7,
+            top_p=1,
+            stop=None,
+            stream=False,
+        )
+        return chat_completion.choices[0].message
+    except Exception as e:
+        print(f"Error calling Groq API: {e}")
+        return {"error": f"Failed to get response from AI: {e}"}
+
+def process_chat_message(db: Session, user_message: str, conversation_id: Optional[str] = None, user_id: Optional[str] = None):
+    """
+    Processes a user's chat message, integrates with LLM and database.
+    """
+    if not conversation_id:
+        conversation_id = str(uuid.uuid4()) # Generate a new conversation ID for new chats
+
+    # Retrieve past conversation history if available
+    history = crud.get_conversation_history(db, conversation_id)
+    messages = []
+    if history:
+        # Add system prompt relevant to the e-commerce context
+        messages.append({
+            "role": "system",
+            "content": "You are a helpful customer support assistant for an e-commerce clothing site. "
+                       "Your primary goal is to assist users with product information, order status, and other store-related queries. "
+                       "You have access to tools to look up product stock, top-selling products, and order status. "
+                       "If you need an Order ID or Product Name to answer a query, please ask the user for it clearly. "
+                       "If you cannot find specific information with your tools, state that you cannot find it. "
+                       "Be concise and polite."
+        })
+        for entry in history:
+            messages.append({"role": "user", "content": entry.user_message})
+            messages.append({"role": "assistant", "content": entry.ai_response})
+
+    messages.append({"role": "user", "content": user_message})
+
+    llm_response = get_llm_response(messages)
+
+    ai_response_content = llm_response.content
+    tool_calls = llm_response.tool_calls
+
+    if tool_calls:
+        # This means the LLM wants to call a function/tool
+        tool_outputs = []
+        for tool_call in tool_calls:
+            function_name = tool_call.function.name
+            function_args = json.loads(tool_call.function.arguments)
+
+            print(f"LLM requested tool call: {function_name} with args: {function_args}")
+
+            # Execute the function based on LLM's request
+            if function_name == "get_top_n_sold_products":
+                result = crud.get_top_n_sold_products(db, n=function_args.get("n"))
+                tool_outputs.append({
+                    "tool_call_id": tool_call.id,
+                    "output": json.dumps(result)
+                })
+            elif function_name == "get_product_stock":
+                result = crud.get_product_stock(db, product_name=function_args.get("product_name"))
+                tool_outputs.append({
+                    "tool_call_id": tool_call.id,
+                    "output": json.dumps(result)
+                })
+            elif function_name == "get_order_status":
+                result = crud.get_order_status(db, order_id=function_args.get("order_id"))
+                tool_outputs.append({
+                    "tool_call_id": tool_call.id,
+                    "output": json.dumps(result)
+                })
+            else:
+                tool_outputs.append({
+                    "tool_call_id": tool_call.id,
+                    "output": json.dumps({"error": f"Unknown tool: {function_name}"})
+                })
+
+        # Add assistant's tool calls and tool outputs to messages for the next LLM turn
+        messages.append(llm_response) # Add the message with tool calls
+        for output in tool_outputs:
+            messages.append({
+                "role": "tool",
+                "tool_call_id": output["tool_call_id"],
+                "content": output["output"]
+            })
+
+        # Get another response from the LLM, incorporating the tool outputs
+        second_llm_response = get_llm_response(messages)
+        ai_response_content = second_llm_response.content
+    elif isinstance(llm_response, dict) and "error" in llm_response:
+        ai_response_content = llm_response["error"] # Handle LLM API errors
+    else:
+        ai_response_content = llm_response.content # Direct text response from LLM
+
+    # Persist conversation to database (Milestone 4)
+    crud.create_conversation_entry(db, user_message, ai_response_content, conversation_id, user_id)
+
+    return ai_response_content, conversation_id
+9. backend/main.py (Milestone 4 & 5)
+The main FastAPI application.
+
+Python
+
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from . import models, schemas, crud, services
+from .database import engine, get_db, Base
+import uuid
+from datetime import datetime
+
+# Create all tables (if they don't exist)
+Base.metadata.create_all(bind=engine)
+
+app = FastAPI(
+    title="E-commerce Chatbot Backend",
+    description="API for customer support chatbot for an e-commerce clothing site.",
+    version="1.0.0",
+)
+
+# Configure CORS (Important for frontend integration later)
+origins = [
+    "http://localhost",
+    "http://localhost:3000", # React default port
+    "http://localhost:8000", # If your frontend runs on a different port
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to the E-commerce Chatbot API!"}
+
+@app.post("/api/chat", response_model=schemas.ChatResponse, status_code=status.HTTP_200_OK)
+async def chat_endpoint(request: schemas.ChatRequest, db: Session = Depends(get_db)):
+    """
+    Primary chat endpoint for user interaction.
+    Accepts a user message and an optional conversation ID to continue a session.
+    """
+    user_message = request.user_message
+    conversation_id = request.conversation_id
+    user_id = request.user_id
+
+    # If no conversation_id is provided, generate a new one
+    if not conversation_id:
+        conversation_id = str(uuid.uuid4())
+        print(f"Starting new conversation with ID: {conversation_id}")
+    else:
+        print(f"Continuing conversation with ID: {conversation_id}")
+
+    try:
+        # Process the message using the service layer (LLM + DB interaction)
+        ai_response_content, current_conversation_id = services.process_chat_message(
+            db, user_message, conversation_id, user_id
+        )
+
+        return schemas.ChatResponse(
+            conversation_id=current_conversation_id,
+            user_message=user_message,
+            ai_response=ai_response_content,
+            timestamp=datetime.now()
+        )
+    except Exception as e:
+        print(f"Error during chat processing: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while processing your request: {e}"
+        )
+
+# Optional: Endpoint to get full conversation history for a given ID
+@app.get("/api/history/{conversation_id}", response_model=List[schemas.ConversationHistoryBase])
+def get_conversation_history_endpoint(conversation_id: str, db: Session = Depends(get_db)):
+    history = crud.get_conversation_history(db, conversation_id)
+    if not history:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation history not found.")
+    return history
