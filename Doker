@@ -1,0 +1,218 @@
+Milestone 9: Full-Stack Integration
+This milestone is primarily about testing and verification, as the connection points (API calls from frontend to backend, and CORS configuration on the backend) have already been set up in the previous steps.
+
+Verification Steps:
+
+Ensure Backend is Running:
+
+Make sure your PostgreSQL database is running.
+
+Start your FastAPI backend:
+
+Bash
+
+cd chatbot/backend
+uvicorn main:app --reload --port 8000
+Verify you can access the backend API documentation at http://localhost:8000/docs.
+
+Ensure Frontend is Running:
+
+Start your React frontend in a separate terminal:
+
+Bash
+
+cd chatbot/frontend
+npm start
+Verify your React app loads in the browser, typically at http://localhost:3000.
+
+Test Chat Functionality End-to-End:
+
+Send a New Message: Type a message (e.g., "What are your top 5 selling products?") in the frontend chat input and click "Send".
+
+Expected: You should see your message appear, then a "Thinking..." message, followed by the AI's response after a few seconds. The AI's response should be relevant to your query, demonstrating LLM integration and database querying.
+
+Check: Look for console errors in your browser's developer tools (F12). Check the backend terminal for any errors.
+
+Ask for Order Status: Try "Show me status of order ID XYZ" (use a valid order ID from your orders.csv or database, like ORD001).
+
+Expected: The AI should respond with the status of that specific order.
+
+Ask for Product Stock: Try "How much stock do you have for Classic T-shirt?" (use a valid product name).
+
+Expected: The AI should respond with the stock quantity.
+
+Test Conversation History:
+
+Start a new chat session (use the "+ New Chat" button if you've implemented it). Send a few messages.
+
+Refresh the page or close and reopen the browser tab. The conversation history list on the left panel should show the previous conversation(s).
+
+Click on a past conversation in the history panel.
+
+Expected: The MessageList should populate with the messages from that past conversation.
+
+CORS Verification: If you encounter CORS errors in your browser console (e.g., "Access to fetch at 'http://localhost:8000/api/chat' from origin 'http://localhost:3000' has been blocked by CORS policy"), double-check the origins list in your backend/main.py file and ensure it includes http://localhost:3000.
+
+At this point, you should have a fully functional application running locally.
+
+Milestone 10: Dockerization
+This is where we package the entire application into containers for easy deployment and portability.
+
+Required Files to Create:
+
+Dockerfile.backend (in chatbot/backend/)
+
+Dockerfile.frontend (in chatbot/frontend/)
+
+docker-compose.yml (in the root chatbot/ directory)
+
+1. chatbot/backend/Dockerfile.backend
+This Dockerfile will build the backend FastAPI application.
+
+Dockerfile
+
+# Use a lightweight Python base image
+FROM python:3.9-slim-buster
+
+# Set the working directory inside the container
+WORKDIR /app
+
+# Copy the backend requirements file first to leverage Docker cache
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the backend application code
+COPY . .
+
+# Copy the .env file (for build purposes if needed, but not recommended for sensitive production creds)
+# For production, consider using Docker secrets or environment variables directly.
+# For local dev, this is fine.
+COPY .env .
+
+# Expose the port FastAPI runs on
+EXPOSE 8000
+
+# Command to run the FastAPI application
+# Using gunicorn for production-grade ASGI server, with uvicorn workers
+# For local development, you might just use: CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["gunicorn", "main:app", "--workers", "1", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
+
+Note: You'll need a requirements.txt file in your backend directory.
+Create chatbot/backend/requirements.txt:
+
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+pandas
+python-dotenv
+groq
+gunicorn
+2. chatbot/frontend/Dockerfile.frontend
+This Dockerfile will build the React frontend application.
+
+Dockerfile
+
+# Use a Node.js base image for building the React app
+FROM node:18-alpine AS build
+
+# Set the working directory inside the container
+WORKDIR /app
+
+# Copy package.json and package-lock.json (if exists) to leverage Docker cache
+COPY package*.json ./
+
+# Install frontend dependencies
+RUN npm install
+
+# Copy the rest of the frontend application code
+COPY . .
+
+# Build the React application for production
+RUN npm run build
+
+# Use a lightweight web server (Nginx) to serve the built React app
+FROM nginx:alpine
+
+# Copy the build output from the previous stage to Nginx's public directory
+COPY --from=build /app/build /usr/share/nginx/html
+
+# Copy custom nginx configuration (optional, if you have one)
+# COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Expose the default Nginx port
+EXPOSE 80
+
+# Command to start Nginx (default command for nginx:alpine)
+CMD ["nginx", "-g", "daemon off;"]
+3. chatbot/docker-compose.yml
+This file orchestrates all three services: backend, frontend, and PostgreSQL database. Place this in your project root (chatbot/).
+
+YAML
+
+version: '3.8'
+
+services:
+  db:
+    image: postgres:13-alpine # Use a specific version of PostgreSQL
+    container_name: chatbot_postgres_db
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # Persist database data
+      # Initial schema and data load - only runs once on first container creation
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432" # Expose DB port if you need to connect from host
+    healthcheck: # Ensure DB is ready before other services try to connect
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend # Path to backend Dockerfile
+      dockerfile: Dockerfile.backend
+    container_name: chatbot_backend
+    env_file:
+      - ./backend/.env # Load environment variables for the backend service
+    ports:
+      - "8000:8000" # Map host port 8000 to container port 8000
+    depends_on:
+      db:
+        condition: service_healthy # Ensure DB is healthy before starting backend
+    volumes:
+      # Mount the data folder for the load_data.py script to access CSVs
+      # Ensure this path is correct relative to your project root
+      - ./data:/app/data
+    # Command to run load_data.py after the backend server starts.
+    # This is a common pattern for initial data population in Docker Compose.
+    # The `uvicorn` command for `main:app` needs to be replaced in Dockerfile.backend
+    # with `gunicorn` for production, but for data load we might need a separate entrypoint
+    # For simplicity, let's assume `load_data.py` is run manually once, or handled within the backend init
+    # For automated data loading, you'd typically have a separate `init` service or a custom entrypoint script
+    # For this setup, the `docker-entrypoint-initdb.d` for postgres handles schema, but *not* CSV data.
+    # We will need to run `load_data.py` *manually* inside the backend container or via a separate service.
+    # Let's add a custom entrypoint to the backend Dockerfile or a separate compose service for loading data.
+    # For now, let's assume the data load step (`python load_data.py`) is done outside docker-compose OR
+    # you'd run it manually once inside the running container:
+    # `docker exec -it chatbot_backend python /app/load_data.py`
+    # Let's adjust the backend Dockerfile to include `load_data.py`
+
+  frontend:
+    build:
+      context: ./frontend # Path to frontend Dockerfile
+      dockerfile: Dockerfile.frontend
+    container_name: chatbot_frontend
+    ports:
+      - "3000:80" # Map host port 3000 to container port 80 (Nginx default)
+    depends_on:
+      - backend # Frontend needs backend to be up for API calls (though not strictly "healthy")
+
+volumes:
+  postgres_data: # Define the named volume for PostgreSQL data persistence
