@@ -1,0 +1,675 @@
+1. frontend/src/api/chatApi.js
+This file will handle all communication with your FastAPI backend.
+
+JavaScript
+
+const API_BASE_URL = 'http://localhost:8000/api'; // Your FastAPI backend URL
+
+export const sendMessageToBackend = async (userMessage, conversationId = null, userId = null) => {
+    try {
+        const response = await fetch(`${API_BASE_URL}/chat`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                user_message: userMessage,
+                conversation_id: conversationId,
+                user_id: userId, // Optional: if you're tracking users
+            }),
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || 'Failed to send message to backend.');
+        }
+
+        const data = await response.json();
+        return data;
+    } catch (error) {
+        console.error('Error sending message to backend:', error);
+        throw error;
+    }
+};
+
+export const fetchConversationHistory = async (conversationId) => {
+    try {
+        const response = await fetch(`${API_BASE_URL}/history/${conversationId}`);
+
+        if (!response.ok) {
+            if (response.status === 404) {
+                // Specific handling for "not found" if history is empty or conversation_id doesn't exist
+                return [];
+            }
+            const errorData = await response.json();
+            throw new Error(errorData.detail || 'Failed to fetch conversation history.');
+        }
+
+        const data = await response.json();
+        return data;
+    } catch (error) {
+        console.error('Error fetching conversation history:', error);
+        throw error;
+    }
+};
+
+// This is a placeholder for fetching a list of all known conversation IDs
+// In a real app, this would come from a backend endpoint
+export const fetchAllConversationIds = async () => {
+    // For demonstration, we'll store conversation IDs in local storage.
+    // In a production app, you'd have a backend endpoint to list user's conversation IDs.
+    const allConversations = JSON.parse(localStorage.getItem('allConversations')) || {};
+    return Object.keys(allConversations).map(id => ({ conversation_id: id, timestamp: allConversations[id].timestamp }));
+};
+2. frontend/src/hooks/useChatState.js (Milestone 7)
+This custom hook will manage the core state for the chat, including messages, loading status, and conversation ID.
+
+JavaScript
+
+import { useState, useRef, useCallback } from 'react';
+import { v4 as uuidv4 } from 'uuid'; // For generating new conversation IDs
+import { sendMessageToBackend, fetchConversationHistory } from '../api/chatApi';
+
+const useChatState = () => {
+    const [messages, setMessages] = useState([]);
+    const [isLoading, setIsLoading] = useState(false);
+    const [userInput, setUserInput] = useState('');
+    const [currentConversationId, setCurrentConversationId] = useState(null);
+    const [error, setError] = useState(null);
+    const messageListRef = useRef(null); // Ref for scrolling to bottom
+
+    // Effect to scroll to the bottom of the message list
+    const scrollToBottom = useCallback(() => {
+        if (messageListRef.current) {
+            messageListRef.current.scrollTop = messageListRef.current.scrollHeight;
+        }
+    }, []);
+
+    // Function to handle sending a message
+    const handleSendMessage = useCallback(async () => {
+        if (!userInput.trim()) return;
+
+        const newUserMessage = { sender: 'user', text: userInput };
+        setMessages((prevMessages) => [...prevMessages, newUserMessage]);
+        setUserInput(''); // Clear input immediately
+        setIsLoading(true);
+        setError(null); // Clear any previous errors
+
+        // Generate a new conversation ID if it's a fresh chat
+        const conversationIdToSend = currentConversationId || uuidv4();
+        if (!currentConversationId) {
+            setCurrentConversationId(conversationIdToSend);
+            // Store new conversation in local storage
+            const allConversations = JSON.parse(localStorage.getItem('allConversations')) || {};
+            allConversations[conversationIdToSend] = { timestamp: new Date().toISOString(), title: userInput.substring(0, 30) + '...'}; // Simple title for history
+            localStorage.setItem('allConversations', JSON.stringify(allConversations));
+        }
+
+        try {
+            const backendResponse = await sendMessageToBackend(
+                userInput,
+                conversationIdToSend
+            );
+            const aiResponse = { sender: 'ai', text: backendResponse.ai_response };
+            setMessages((prevMessages) => [...prevMessages, aiResponse]);
+            // Ensure the conversation ID is set from the backend response, if it changed
+            setCurrentConversationId(backendResponse.conversation_id);
+
+        } catch (err) {
+            console.error('Failed to send message:', err);
+            setError('Failed to get a response from the chatbot. Please try again.');
+            // Re-add user message if AI fails to respond for better UX
+            setMessages((prevMessages) => [...prevMessages.slice(0, -1)]);
+        } finally {
+            setIsLoading(false);
+            scrollToBottom(); // Scroll after state update
+        }
+    }, [userInput, currentConversationId, scrollToBottom]);
+
+    // Function to load a past conversation
+    const loadConversation = useCallback(async (convId) => {
+        setIsLoading(true);
+        setError(null);
+        try {
+            const history = await fetchConversationHistory(convId);
+            const formattedMessages = history.flatMap(entry => [
+                { sender: 'user', text: entry.user_message, id: entry.id + '-user' },
+                { sender: 'ai', text: entry.ai_response, id: entry.id + '-ai' }
+            ]);
+            setMessages(formattedMessages);
+            setCurrentConversationId(convId);
+        } catch (err) {
+            console.error('Failed to load conversation history:', err);
+            setError('Failed to load conversation history. It might be empty or unavailable.');
+            setMessages([]); // Clear messages on error
+            setCurrentConversationId(null); // Reset current conversation
+        } finally {
+            setIsLoading(false);
+            scrollToBottom(); // Scroll after state update
+        }
+    }, [scrollToBottom]);
+
+    const startNewConversation = useCallback(() => {
+        setMessages([]);
+        setCurrentConversationId(null);
+        setUserInput('');
+        setError(null);
+    }, []);
+
+
+    return {
+        messages,
+        isLoading,
+        userInput,
+        setUserInput,
+        currentConversationId,
+        handleSendMessage,
+        loadConversation,
+        startNewConversation,
+        error,
+        messageListRef,
+        scrollToBottom, // Expose for external scroll triggers
+    };
+};
+
+export default useChatState;
+3. frontend/src/components/Message.js (Milestone 6)
+Represents a single chat message, styled differently for user and AI.
+
+JavaScript
+
+import React from 'react';
+import '../index.css'; // For basic styling
+
+const Message = ({ sender, text }) => {
+    const messageClass = sender === 'user' ? 'user-message' : 'ai-message';
+    return (
+        <div className={`message ${messageClass}`}>
+            <div className="message-content">
+                {text}
+            </div>
+        </div>
+    );
+};
+
+export default Message;
+4. frontend/src/components/MessageList.js (Milestone 6)
+Renders a list of Message components.
+
+JavaScript
+
+import React, { useEffect } from 'react';
+import Message from './Message';
+import '../index.css';
+
+const MessageList = ({ messages, isLoading, messageListRef, scrollToBottom }) => {
+    // Scroll to bottom whenever messages or loading state changes
+    useEffect(() => {
+        scrollToBottom();
+    }, [messages, isLoading, scrollToBottom]);
+
+    return (
+        <div className="message-list" ref={messageListRef}>
+            {messages.map((msg, index) => (
+                <Message key={index} sender={msg.sender} text={msg.text} />
+            ))}
+            {isLoading && (
+                <div className="message ai-message loading-message">
+                    <div className="message-content">
+                        Thinking...
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+export default MessageList;
+5. frontend/src/components/UserInput.js (Milestone 6)
+The input form for typing messages.
+
+JavaScript
+
+import React from 'react';
+import '../index.css';
+
+const UserInput = ({ userInput, setUserInput, onSendMessage, isLoading }) => {
+    const handleKeyPress = (event) => {
+        if (event.key === 'Enter' && !isLoading) {
+            event.preventDefault(); // Prevent new line in textarea
+            onSendMessage();
+        }
+    };
+
+    return (
+        <div className="user-input">
+            <textarea
+                value={userInput}
+                onChange={(e) => setUserInput(e.target.value)}
+                onKeyPress={handleKeyPress}
+                placeholder="Type your message..."
+                disabled={isLoading}
+                rows="3"
+            />
+            <button onClick={onSendMessage} disabled={isLoading}>
+                {isLoading ? 'Sending...' : 'Send'}
+            </button>
+        </div>
+    );
+};
+
+export default UserInput;
+6. frontend/src/components/HistoryPanel.js (Milestone 8)
+The side panel for displaying and loading past conversations.
+
+JavaScript
+
+import React, { useState, useEffect, useCallback } from 'react';
+import { fetchAllConversationIds } from '../api/chatApi';
+import '../index.css';
+
+const HistoryPanel = ({ onLoadConversation, currentConversationId, onStartNewConversation }) => {
+    const [pastConversations, setPastConversations] = useState([]);
+    const [error, setError] = useState(null);
+
+    const loadPastConversations = useCallback(async () => {
+        try {
+            setError(null);
+            const ids = await fetchAllConversationIds();
+            // Sort by timestamp descending
+            const sortedIds = ids.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+            setPastConversations(sortedIds);
+        } catch (err) {
+            console.error('Error fetching past conversations:', err);
+            setError('Failed to load past conversations.');
+        }
+    }, []);
+
+    useEffect(() => {
+        loadPastConversations();
+    }, [currentConversationId, loadPastConversations]); // Reload when current conversation changes
+
+    return (
+        <div className="history-panel">
+            <h3>Past Conversations</h3>
+            <button className="new-chat-button" onClick={onStartNewConversation}>
+                + New Chat
+            </button>
+            {error && <div className="error-message">{error}</div>}
+            <ul className="conversation-list">
+                {pastConversations.length > 0 ? (
+                    pastConversations.map((conv) => (
+                        <li
+                            key={conv.conversation_id}
+                            className={`conversation-item ${conv.conversation_id === currentConversationId ? 'active' : ''}`}
+                            onClick={() => onLoadConversation(conv.conversation_id)}
+                        >
+                            <span className="conversation-title">
+                                {conv.title || `Chat with ${new Date(conv.timestamp).toLocaleDateString()}`}
+                            </span>
+                            <span className="conversation-date">
+                                {new Date(conv.timestamp).toLocaleTimeString()}
+                            </span>
+                        </li>
+                    ))
+                ) : (
+                    <p>No past conversations found.</p>
+                )}
+            </ul>
+        </div>
+    );
+};
+
+export default HistoryPanel;
+7. frontend/src/components/ChatWindow.js (Milestone 6)
+The main container component that orchestrates the entire chat interface.
+
+JavaScript
+
+import React from 'react';
+import MessageList from './MessageList';
+import UserInput from './UserInput';
+import HistoryPanel from './HistoryPanel';
+import useChatState from '../hooks/useChatState';
+import '../index.css';
+
+const ChatWindow = () => {
+    const {
+        messages,
+        isLoading,
+        userInput,
+        setUserInput,
+        currentConversationId,
+        handleSendMessage,
+        loadConversation,
+        startNewConversation,
+        error,
+        messageListRef,
+        scrollToBottom
+    } = useChatState();
+
+    return (
+        <div className="chat-container">
+            <HistoryPanel
+                onLoadConversation={loadConversation}
+                currentConversationId={currentConversationId}
+                onStartNewConversation={startNewConversation}
+            />
+            <div className="chat-window">
+                <div className="chat-header">
+                    <h2>E-commerce Chatbot</h2>
+                    {currentConversationId && (
+                        <span className="conversation-id">
+                            ID: {currentConversationId.substring(0, 8)}...
+                        </span>
+                    )}
+                </div>
+                {error && <div className="chat-error-message">{error}</div>}
+                <MessageList
+                    messages={messages}
+                    isLoading={isLoading}
+                    messageListRef={messageListRef}
+                    scrollToBottom={scrollToBottom}
+                />
+                <UserInput
+                    userInput={userInput}
+                    setUserInput={setUserInput}
+                    onSendMessage={handleSendMessage}
+                    isLoading={isLoading}
+                />
+            </div>
+        </div>
+    );
+};
+
+export default ChatWindow;
+8. frontend/src/App.js
+The root React component.
+
+JavaScript
+
+import React from 'react';
+import ChatWindow from './components/ChatWindow';
+import './index.css'; // Import global styles
+
+function App() {
+  return (
+    <div className="App">
+      <ChatWindow />
+    </div>
+  );
+}
+
+export default App;
+9. frontend/src/index.js
+The entry point for the React application.
+
+JavaScript
+
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import './index.css'; // Global styles
+import App from './App';
+import reportWebVitals from './reportWebVitals';
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+reportWebVitals();
+10. frontend/src/index.css (Basic Styling)
+This provides minimal styling to make the components visible and somewhat organized. You can expand on this.
+
+CSS
+
+/* General Body Styles */
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #f0f2f5;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+}
+
+/* App Container */
+.App {
+  display: flex;
+  width: 100%;
+  height: 100vh; /* Full viewport height */
+  overflow: hidden; /* Prevent scrolling on App level */
+}
+
+/* Chat Container (overall layout) */
+.chat-container {
+  display: flex;
+  width: 90%; /* Adjust as needed */
+  max-width: 1200px;
+  height: 90vh; /* Adjust as needed */
+  background-color: #fff;
+  border-radius: 10px;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+}
+
+/* History Panel */
+.history-panel {
+  flex: 0 0 250px; /* Fixed width */
+  background-color: #e0e0e0;
+  padding: 20px;
+  border-right: 1px solid #ccc;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto; /* Scroll for history list */
+}
+
+.history-panel h3 {
+  margin-top: 0;
+  margin-bottom: 20px;
+  color: #333;
+}
+
+.new-chat-button {
+  background-color: #4CAF50; /* Green */
+  color: white;
+  padding: 10px 15px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 16px;
+  margin-bottom: 15px;
+  transition: background-color 0.3s ease;
+}
+
+.new-chat-button:hover {
+  background-color: #45a049;
+}
+
+.conversation-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  flex-grow: 1;
+}
+
+.conversation-item {
+  padding: 10px 15px;
+  border-bottom: 1px solid #d0d0d0;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: background-color 0.2s ease, color 0.2s ease;
+  font-size: 0.9em;
+}
+
+.conversation-item:last-child {
+  border-bottom: none;
+}
+
+.conversation-item:hover {
+  background-color: #c0c0c0;
+}
+
+.conversation-item.active {
+  background-color: #a0a0a0;
+  color: white;
+  font-weight: bold;
+}
+
+.conversation-title {
+    flex-grow: 1;
+    margin-right: 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.conversation-date {
+    font-size: 0.8em;
+    color: #555;
+}
+.conversation-item.active .conversation-date {
+    color: #eee;
+}
+
+
+/* Chat Window (main chat area) */
+.chat-window {
+  flex-grow: 1; /* Takes remaining space */
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+}
+
+.chat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #eee;
+}
+
+.chat-header h2 {
+  margin: 0;
+  color: #333;
+}
+
+.conversation-id {
+  font-size: 0.8em;
+  color: #777;
+}
+
+/* Message List */
+.message-list {
+  flex-grow: 1;
+  overflow-y: auto; /* Enable scrolling for messages */
+  padding-right: 10px; /* For scrollbar */
+  margin-bottom: 15px;
+}
+
+/* Individual Message */
+.message {
+  display: flex;
+  margin-bottom: 15px;
+}
+
+.message-content {
+  padding: 12px 18px;
+  border-radius: 20px;
+  max-width: 75%;
+  word-wrap: break-word;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+.user-message {
+  justify-content: flex-end;
+}
+
+.user-message .message-content {
+  background-color: #007bff;
+  color: white;
+  border-bottom-right-radius: 5px; /* Sharper corner for last bubble */
+}
+
+.ai-message {
+  justify-content: flex-start;
+}
+
+.ai-message .message-content {
+  background-color: #e2e6ea;
+  color: #333;
+  border-bottom-left-radius: 5px; /* Sharper corner for last bubble */
+}
+
+.loading-message .message-content {
+    background-color: #f0f0f0;
+    color: #777;
+    font-style: italic;
+}
+
+
+/* User Input */
+.user-input {
+  display: flex;
+  gap: 10px;
+  padding-top: 15px;
+  border-top: 1px solid #eee;
+}
+
+.user-input textarea {
+  flex-grow: 1;
+  padding: 12px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 16px;
+  resize: none; /* Disable manual resize */
+  min-height: 50px;
+  max-height: 150px; /* Prevent it from growing too large */
+  overflow-y: auto;
+}
+
+.user-input button {
+  background-color: #007bff;
+  color: white;
+  padding: 12px 20px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 16px;
+  transition: background-color 0.3s ease;
+}
+
+.user-input button:hover:not(:disabled) {
+  background-color: #0056b3;
+}
+
+.user-input button:disabled {
+  background-color: #cccccc;
+  cursor: not-allowed;
+}
+
+/* Error Message */
+.error-message, .chat-error-message {
+    color: #d9534f;
+    background-color: #f2dede;
+    border: 1px solid #ebccd1;
+    padding: 10px;
+    margin-bottom: 15px;
+    border-radius: 5px;
+    text-align: center;
+}
+.chat-error-message {
+    margin-left: auto;
+    margin-right: auto;
+    max-width: 80%;
+}
